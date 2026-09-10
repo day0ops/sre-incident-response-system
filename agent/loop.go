@@ -19,7 +19,8 @@ const systemPrompt = `You are an on-call SRE incident response copilot. When ask
 3. If a previous, healthy version is available, call rollback_deployment with that exact deployment name and version to fix it.
 4. Report back clearly and concisely what you found and what you did.
 Only call rollback_deployment once you have identified a specific previous version from get_deployment_history - never guess a version.
-If a tool you need for the next step isn't in your available tools list, don't retry other tools hoping it appears - report your findings so far and stop.`
+If a tool you need for the next step isn't in your available tools list, don't retry other tools hoping it appears - report your findings so far and stop.
+If asked "whoami", about your identity, or what token/claims a server received, call the whoami tool on the relevant server and report exactly what it returns - do not just describe what the tool does instead of calling it.`
 
 // discoverTools lists every server's tools and returns them as one merged
 // OpenAI-compatible tool spec list, plus a map from tool name to the server

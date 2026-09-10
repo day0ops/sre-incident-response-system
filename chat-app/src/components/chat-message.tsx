@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { AlertCircle, CheckCircle2, Loader2, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -15,6 +16,83 @@ export interface Turn {
   ok?: boolean;
   error?: string;
   consentUrl?: string;
+}
+
+// JWT claims come back as raw unix seconds - unreadable at a glance without this.
+const UNIX_SECONDS_CLAIMS = new Set(["exp", "iat", "nbf"]);
+
+function formatValue(key: string, value: unknown) {
+  if (value === null || value === undefined) {
+    return <span className="text-muted-foreground">-</span>;
+  }
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (Array.isArray(value)) {
+    return value.length ? value.join(", ") : <span className="text-muted-foreground">-</span>;
+  }
+  if (value && typeof value === "object") {
+    return <KeyValueView data={value as Record<string, unknown>} nested />;
+  }
+  if (UNIX_SECONDS_CLAIMS.has(key) && typeof value === "number") {
+    return `${new Date(value * 1000).toISOString()} (${value})`;
+  }
+  return String(value);
+}
+
+// Renders a plain object as a two-column key/value grid instead of a raw JSON
+// dump - nested objects (e.g. whoami's `claims`) recurse into an indented
+// sub-table rather than collapsing into an unreadable one-line blob.
+function KeyValueView({ data, nested }: { data: Record<string, unknown>; nested?: boolean }) {
+  return (
+    <dl
+      className={cn(
+        "grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs",
+        nested && "mt-1 border-l-2 border-border pl-3",
+      )}
+    >
+      {Object.entries(data).map(([key, value]) => (
+        <Fragment key={key}>
+          <dt className="text-muted-foreground">{key}</dt>
+          <dd className="min-w-0 font-mono break-all">{formatValue(key, value)}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+// A string result that's actually a JSON object (e.g. the LLM echoing a tool's
+// raw output verbatim) renders far better as a table than as literal text.
+function tryParseJsonObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ResultView({ result }: { result: unknown }) {
+  const parsed =
+    typeof result === "string"
+      ? tryParseJsonObject(result)
+      : result && typeof result === "object" && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : undefined;
+
+  if (parsed) {
+    return (
+      <div className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2">
+        <KeyValueView data={parsed} />
+      </div>
+    );
+  }
+
+  return (
+    <pre className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2 text-xs whitespace-pre-wrap">
+      {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+    </pre>
+  );
 }
 
 export function ChatMessage({
@@ -78,9 +156,7 @@ export function ChatMessage({
                 Done
               </p>
             )}
-            <pre className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2 text-xs whitespace-pre-wrap">
-              {typeof turn.result === "string" ? turn.result : JSON.stringify(turn.result, null, 2)}
-            </pre>
+            <ResultView result={turn.result} />
           </div>
         )}
 
