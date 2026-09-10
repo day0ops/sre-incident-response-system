@@ -1,5 +1,7 @@
-import { Fragment } from "react";
+import { type ReactNode } from "react";
 import { AlertCircle, CheckCircle2, Loader2, ShieldCheck } from "lucide-react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -18,79 +20,81 @@ export interface Turn {
   consentUrl?: string;
 }
 
-// JWT claims come back as raw unix seconds - unreadable at a glance without this.
-const UNIX_SECONDS_CLAIMS = new Set(["exp", "iat", "nbf"]);
-
-function formatValue(key: string, value: unknown) {
-  if (value === null || value === undefined) {
-    return <span className="text-muted-foreground">-</span>;
-  }
-  if (typeof value === "boolean") return value ? "yes" : "no";
-  if (Array.isArray(value)) {
-    return value.length ? value.join(", ") : <span className="text-muted-foreground">-</span>;
-  }
-  if (value && typeof value === "object") {
-    return <KeyValueView data={value as Record<string, unknown>} nested />;
-  }
-  if (UNIX_SECONDS_CLAIMS.has(key) && typeof value === "number") {
-    return `${new Date(value * 1000).toISOString()} (${value})`;
-  }
-  return String(value);
-}
-
-// Renders a plain object as a two-column key/value grid instead of a raw JSON
-// dump - nested objects (e.g. whoami's `claims`) recurse into an indented
-// sub-table rather than collapsing into an unreadable one-line blob.
-function KeyValueView({ data, nested }: { data: Record<string, unknown>; nested?: boolean }) {
+// The LLM's own prose answer often comes back as markdown (bold labels, bullet
+// lists, etc.) - render it properly instead of dumping literal "**text**"/
+// "- item" syntax. Tailwind's preflight strips default list styling, so
+// ul/ol need it restored explicitly or bullets just vanish.
+function AssistantMarkdown({ text }: { text: string }) {
   return (
-    <dl
-      className={cn(
-        "grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs",
-        nested && "mt-1 border-l-2 border-border pl-3",
-      )}
+    <Markdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }: { children?: ReactNode }) => <p className="mb-2 last:mb-0">{children}</p>,
+        ul: ({ children }: { children?: ReactNode }) => (
+          <ul className="mb-2 list-disc space-y-0.5 pl-4 last:mb-0">{children}</ul>
+        ),
+        ol: ({ children }: { children?: ReactNode }) => (
+          <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>
+        ),
+        strong: ({ children }: { children?: ReactNode }) => (
+          <strong className="font-semibold">{children}</strong>
+        ),
+        code: ({ children }: { children?: ReactNode }) => (
+          <code className="rounded bg-background/70 px-1 py-0.5 font-mono text-xs break-all">
+            {children}
+          </code>
+        ),
+        a: ({ children, href }: { children?: ReactNode; href?: string }) => (
+          <a href={href} target="_blank" rel="noreferrer" className="underline underline-offset-2">
+            {children}
+          </a>
+        ),
+        h1: ({ children }: { children?: ReactNode }) => (
+          <p className="mb-1 font-semibold">{children}</p>
+        ),
+        h2: ({ children }: { children?: ReactNode }) => (
+          <p className="mb-1 font-semibold">{children}</p>
+        ),
+        h3: ({ children }: { children?: ReactNode }) => (
+          <p className="mb-1 font-semibold">{children}</p>
+        ),
+      }}
     >
-      {Object.entries(data).map(([key, value]) => (
-        <Fragment key={key}>
-          <dt className="text-muted-foreground">{key}</dt>
-          <dd className="min-w-0 font-mono break-all">{formatValue(key, value)}</dd>
-        </Fragment>
-      ))}
-    </dl>
+      {text}
+    </Markdown>
   );
 }
 
-// A string result that's actually a JSON object (e.g. the LLM echoing a tool's
-// raw output verbatim) renders far better as a table than as literal text.
-function tryParseJsonObject(text: string): Record<string, unknown> | undefined {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("{")) return undefined;
-  try {
-    const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
+// Structured results (objects, or a string that's actually JSON - e.g. the
+// LLM echoing a tool's raw output verbatim) print as raw formatted JSON. Not
+// a pretty table - that broke down under whoami's nested, long-valued claims
+// across 3 servers. A plain <pre> just wraps normally with no column-width
+// surprises.
 function ResultView({ result }: { result: unknown }) {
-  const parsed =
-    typeof result === "string"
-      ? tryParseJsonObject(result)
-      : result && typeof result === "object" && !Array.isArray(result)
-        ? (result as Record<string, unknown>)
-        : undefined;
-
-  if (parsed) {
+  if (typeof result === "string") {
+    const trimmed = result.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return (
+          <pre className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2 text-xs whitespace-pre-wrap">
+            {JSON.stringify(parsed, null, 2)}
+          </pre>
+        );
+      } catch {
+        // Not actually JSON - fall through to markdown below.
+      }
+    }
     return (
-      <div className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2">
-        <KeyValueView data={parsed} />
+      <div className="mt-1 text-sm">
+        <AssistantMarkdown text={result} />
       </div>
     );
   }
 
   return (
     <pre className="mt-1 overflow-x-auto rounded-lg bg-background/50 p-2 text-xs whitespace-pre-wrap">
-      {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+      {JSON.stringify(result, null, 2)}
     </pre>
   );
 }
@@ -120,7 +124,7 @@ export function ChatMessage({
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[80%] rounded-xl px-3.5 py-2.5 text-sm ring-1",
+          "max-w-[85%] rounded-xl px-3.5 py-2.5 text-sm ring-1",
           isUser
             ? "bg-primary text-primary-foreground ring-primary/10"
             : "bg-muted text-foreground ring-foreground/10",

@@ -54,6 +54,37 @@ app.post("/api/task", (req, res) => {
   });
 });
 
+app.get("/api/whoami", (_req, res) => {
+  const keycloakClaims = (aud) => ({
+    authorization_present: true,
+    claims: {
+      iss: "https://keycloak.mesh-demo.kasunt.apac.fe.solo.io/realms/sre-irs",
+      aud,
+      exp: 1799900000,
+      iat: 1799896400,
+      sub: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      preferred_username: "alice@sreirsdemo.onmicrosoft.com",
+      azp: "gateway-exchange",
+    },
+  });
+  res.json({
+    "incident-mcp": keycloakClaims("incident-mcp"),
+    "runbook-mcp": keycloakClaims("runbook-mcp"),
+    "repo-mcp": {
+      authorization_present: true,
+      claims: {
+        iss: "https://login.microsoftonline.com/61d878b3-d211-4da5-99ca-8108d01b2156/v2.0",
+        aud: "e32b61f8-6801-4d3d-993e-882252ca06cd",
+        exp: 1799900000,
+        iat: 1799896400,
+        sub: "AAAAAAAAAAAAAAAAAAAAAI7EAsdfg1234",
+        name: "alice",
+        roles: ["deployment.rollback"],
+      },
+    },
+  });
+});
+
 app.post("/api/complete-rollback", (_req, res) => {
   res.json({
     steps: ["agent: completing rollback consent", "agent: calling rollback_deployment"],
