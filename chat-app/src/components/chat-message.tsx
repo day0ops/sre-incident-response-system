@@ -86,7 +86,7 @@ function ResultView({ result }: { result: unknown }) {
       }
     }
     return (
-      <div className="mt-1 text-sm">
+      <div className="mt-1 rounded-lg bg-background/50 p-2 text-sm dark:text-accent-foreground">
         <AssistantMarkdown text={result} />
       </div>
     );
