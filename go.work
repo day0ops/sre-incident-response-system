@@ -1,0 +1,11 @@
+// Pinned to the installed toolchain (go1.27.0), not the plan's original
+// go 1.23 draft -- go mod init bumps this automatically per module added,
+// so tracking the real toolchain avoids repeated drift across every task.
+go 1.27.0
+
+use (
+	./agent
+	./mcp-servers/incident-mcp
+	./mcp-servers/repo-mcp
+	./mcp-servers/runbook-mcp
+)

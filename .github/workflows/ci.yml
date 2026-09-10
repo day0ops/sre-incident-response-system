@@ -1,0 +1,193 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_all:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # required for GCP Workload Identity Federation
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go-components: ${{ steps.components.outputs.result }}
+      ui-changed: ${{ steps.filter.outputs.ui }}
+      is-release: ${{ steps.release.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            agent: 'agent/**'
+            incident-mcp: 'mcp-servers/incident-mcp/**'
+            runbook-mcp: 'mcp-servers/runbook-mcp/**'
+            repo-mcp: 'mcp-servers/repo-mcp/**'
+            ui: 'chat-app/**'
+      # A push of a `v*` tag is a release: every component gets rebuilt, tagged
+      # with the tag name, and pushed, then the release job publishes it.
+      - id: release
+        run: echo "result=${{ startsWith(github.ref, 'refs/tags/') }}" >> "$GITHUB_OUTPUT"
+      # workflow_dispatch's force_all (or a release) rebuilds every Go component
+      # regardless of what changed; otherwise use paths-filter's diff.
+      # ALL_GO_COMPONENTS is kept in sync with the filters above as components are added.
+      - id: components
+        env:
+          ALL_GO_COMPONENTS: '["agent","incident-mcp","runbook-mcp","repo-mcp"]'
+          FORCE_ALL: ${{ github.event.inputs.force_all == 'true' || steps.release.outputs.result == 'true' }}
+          CHANGED: ${{ steps.filter.outputs.changes }}
+        run: |
+          if [ "$FORCE_ALL" = "true" ]; then
+            echo "result=$ALL_GO_COMPONENTS" >> "$GITHUB_OUTPUT"
+          else
+            # steps.filter.outputs.changes includes every matched filter name, including
+            # "ui" -- exclude it here since UI changes are handled separately by
+            # lint-test-ui/build-ui, not the Go component build matrix.
+            GO_ONLY=$(echo "$CHANGED" | jq -c '[.[] | select(. != "ui")]')
+            echo "result=$GO_ONLY" >> "$GITHUB_OUTPUT"
+          fi
+
+  lint-test-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: 'go.work' }
+      - run: gofmt -l . | tee /tmp/fmtdiff && [ ! -s /tmp/fmtdiff ]
+      # go.work's `use` directives are workspace modules, not a single module tree, so
+      # a bare `./...` from the repo root doesn't resolve -- list each module path
+      # explicitly below (kept in sync with go.work as components are added).
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1
+          args: >-
+            ./agent/... ./mcp-servers/incident-mcp/... ./mcp-servers/runbook-mcp/... ./mcp-servers/repo-mcp/...
+      - run: go build ./agent/... ./mcp-servers/incident-mcp/... ./mcp-servers/runbook-mcp/... ./mcp-servers/repo-mcp/...
+      - run: go test ./agent/... ./mcp-servers/incident-mcp/... ./mcp-servers/runbook-mcp/... ./mcp-servers/repo-mcp/... -v
+
+  lint-test-ui:
+    if: needs.changes.outputs.ui-changed == 'true' || github.event.inputs.force_all == 'true' || needs.changes.outputs.is-release == 'true'
+    needs: changes
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: chat-app }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: 'npm', cache-dependency-path: chat-app/package-lock.json }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+
+  build:
+    needs: [changes, lint-test-go]
+    if: needs.changes.outputs.go-components != '[]' || github.event.inputs.force_all == 'true' || needs.changes.outputs.is-release == 'true'
+    strategy:
+      matrix:
+        component: ${{ fromJson(needs.changes.outputs.go-components) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker australia-southeast1-docker.pkg.dev
+      - run: |
+          set -euo pipefail
+          # agent lives at the repo root as its own top-level component, mcp-servers/X
+          # covers the three MCP servers -- maxdepth 2 from . covers both in one search.
+          DIR=$(find . -maxdepth 2 -type d -name "${{ matrix.component }}")
+          IMG="australia-southeast1-docker.pkg.dev/field-engineering-apac/kasunt/sre-incident-response-${{ matrix.component }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          GIT_TAG=""
+          if [ "${{ needs.changes.outputs.is-release }}" = "true" ]; then
+            GIT_TAG="${{ github.ref_name }}"
+          fi
+          TAGS=(-t "$IMG:$SHORT_SHA" -t "$IMG:latest")
+          if [ -n "$GIT_TAG" ]; then
+            TAGS+=(-t "$IMG:$GIT_TAG")
+          fi
+          docker build "${TAGS[@]}" "$DIR"
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            docker push "$IMG:$SHORT_SHA"
+            docker push "$IMG:latest"
+            if [ -n "$GIT_TAG" ]; then
+              docker push "$IMG:$GIT_TAG"
+            fi
+          fi
+
+  build-ui:
+    needs: [changes, lint-test-ui]
+    if: needs.changes.outputs.ui-changed == 'true' || github.event.inputs.force_all == 'true' || needs.changes.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker australia-southeast1-docker.pkg.dev
+      - run: |
+          set -euo pipefail
+          IMG="australia-southeast1-docker.pkg.dev/field-engineering-apac/kasunt/sre-incident-response-chat-app"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          GIT_TAG=""
+          if [ "${{ needs.changes.outputs.is-release }}" = "true" ]; then
+            GIT_TAG="${{ github.ref_name }}"
+          fi
+          TAGS=(-t "$IMG:$SHORT_SHA" -t "$IMG:latest")
+          if [ -n "$GIT_TAG" ]; then
+            TAGS+=(-t "$IMG:$GIT_TAG")
+          fi
+          docker build "${TAGS[@]}" chat-app
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            docker push "$IMG:$SHORT_SHA"
+            docker push "$IMG:latest"
+            if [ -n "$GIT_TAG" ]; then
+              docker push "$IMG:$GIT_TAG"
+            fi
+          fi
+
+  release:
+    needs: [changes, build, build-ui]
+    if: needs.changes.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: List image locations
+        env:
+          GO_COMPONENTS: ${{ needs.changes.outputs.go-components }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          REGISTRY="australia-southeast1-docker.pkg.dev/field-engineering-apac/kasunt"
+          {
+            echo "## Images"
+            echo "$GO_COMPONENTS" | jq -r '.[]' | while read -r component; do
+              echo "- \`$REGISTRY/sre-incident-response-$component:$TAG\`"
+            done
+            echo "- \`$REGISTRY/sre-incident-response-chat-app:$TAG\`"
+          } > release-notes.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file release-notes.md

@@ -1,0 +1,70 @@
+sequenceDiagram
+    actor SRE
+    participant ChatApp as Chat App
+    participant Entra as Azure Entra ID
+    participant Agent
+    participant Gateway as Enterprise Agentgateway
+    participant Keycloak as Keycloak (federated w/ Entra)
+    participant IncidentMCP as incident-mcp (get_unhealthy_pods)
+    participant RunbookMCP as runbook-mcp (get_deployment_history)
+    participant RepoMCP as repo-mcp (rollback_deployment)
+
+    Note over SRE,RepoMCP: Login (once per session)
+    SRE->>ChatApp: Open chat app
+    ChatApp->>Entra: OIDC authorization code redirect
+    Entra->>SRE: Login prompt
+    SRE->>Entra: Credentials
+    Entra->>ChatApp: Entra JWT (aud=agent-gateway)
+
+    Note over SRE,RepoMCP: Read path - stays in the Keycloak-federated home domain, silent
+
+    SRE->>ChatApp: "Why is checkout unhealthy?"
+    ChatApp->>Agent: task + Entra JWT
+    Agent->>Agent: validate own Entra JWT
+    Agent->>Gateway: MCP tools/call get_unhealthy_pods (Bearer Entra JWT)
+    Gateway->>Gateway: validate Entra JWT (JWT auth policy, Entra JWKS)
+    Gateway->>Keycloak: token exchange (subject_token=Entra JWT)
+    Keycloak->>Keycloak: validate via Entra broker federation
+    Keycloak->>Gateway: downscoped Keycloak JWT (aud=incident-mcp)
+    Gateway->>IncidentMCP: MCP tools/call get_unhealthy_pods (Bearer Keycloak JWT)
+    Note right of IncidentMCP: No JWT verification here -<br/>trusts agentgateway entirely,<br/>no tool-level gate
+    IncidentMCP->>Gateway: 3 unhealthy pods, postgres connection failing
+    Gateway->>Agent: result
+    Agent->>ChatApp: "3 unhealthy pods failing readiness..."
+    ChatApp->>SRE: shows pod status
+
+    SRE->>ChatApp: "Show me the recent deployment"
+    ChatApp->>Agent: task + Entra JWT
+    Agent->>Gateway: MCP tools/call get_deployment_history (Bearer Entra JWT)
+    Gateway->>Keycloak: token exchange (subject_token=Entra JWT)
+    Keycloak->>Keycloak: downscope-role-enforcer caps scope to the Entra assertion's roles claim (e.g. deployment.history.read, from an Entra app-role assignment)
+    Keycloak->>Gateway: downscoped Keycloak JWT (aud=runbook-mcp, scope=deployment.history.read or empty)
+    Gateway->>Gateway: mcp-tool-policy CEL check (Require) - 'deployment.history.read' in jwt.roles,<br/>checked against the caller's own Entra JWT, not the downscoped Keycloak token
+    alt caller has the deployment.history.read Entra role
+        Gateway->>RunbookMCP: MCP tools/call get_deployment_history (Bearer Keycloak JWT)
+        Note right of RunbookMCP: No JWT/role verification here<br/>either - authorization is<br/>entirely the gateway's job now
+        RunbookMCP->>Gateway: checkout-api v42 (8m ago), previous v41
+        Gateway->>Agent: result
+        Agent->>ChatApp: "v42 deployed 8 min ago, previous v41"
+        ChatApp->>SRE: shows deployment history
+    else role missing (no matching Entra app-role assignment)
+        Gateway->>Agent: denied by mcp-tool-policy before reaching runbook-mcp
+        Agent->>ChatApp: tool call denied
+        ChatApp->>SRE: shows access-denied error
+    end
+
+    Note over SRE,RepoMCP: Write path - crosses into an Entra-native domain Keycloak was never federated into
+
+    SRE->>ChatApp: "Roll it back"
+    ChatApp->>Agent: task + Entra JWT
+    Agent->>Gateway: MCP tools/call rollback_deployment (Bearer Entra JWT)
+    Note over Gateway: repo-mcp sits behind its own dedicated HTTPRoute, NOT covered by the shared JWT-auth policy - the Authorization header survives untouched into this exchange
+    Gateway->>Entra: POST /{tenantId}/oauth2/v2.0/token - grant_type=jwt-bearer, assertion=Entra JWT, client credentials, scope=api://repo-mcp/.default
+    Note over Gateway,Entra: Requires admin consent granted in advance (agentgateway app registration -> API permissions -> repo-mcp access_as_user -> Grant admin consent). No interactive popup, no banked token - a silent, direct On-Behalf-Of exchange on every request
+    Entra->>Gateway: repo-mcp-scoped access token
+    Gateway->>RepoMCP: MCP tools/call rollback_deployment (Bearer Entra OBO token)
+    Note right of RepoMCP: No JWT/role check here.<br/>Unlike get_deployment_history, no<br/>scope-based mcp-tool-policy exists yet -<br/>gated only by Entra's admin-consent/assignment.
+    RepoMCP->>Gateway: rollback successful, 5/5 healthy
+    Gateway->>Agent: result
+    Agent->>ChatApp: "Rollback successful, 5/5 replicas healthy"
+    ChatApp->>SRE: shows confirmation
