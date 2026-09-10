@@ -181,11 +181,15 @@ func main() {
 		_ = json.NewEncoder(w).Encode(taskResponse{Steps: steps, Result: result.FinalText})
 	})
 
-	// Temporary diagnostic route: calls runbook-mcp's whoami tool directly,
-	// bypassing the LLM loop entirely. gpt-4o was reliably declining to call
-	// "whoami" itself (reads as a credential/identity probe regardless of
-	// prompt phrasing) -- this lets us verify what the Keycloak-exchanged
-	// token actually contains without depending on the model's cooperation.
+	// Temporary diagnostic route: calls every MCP server's whoami tool
+	// directly, bypassing the LLM loop entirely. gpt-4o was reliably
+	// declining to call "whoami" itself (reads as a credential/identity
+	// probe regardless of prompt phrasing) -- this lets us verify what
+	// each server actually received (the Keycloak-exchanged token for
+	// incident-mcp/runbook-mcp, the Entra OBO token for repo-mcp) without
+	// depending on the model's cooperation. One server erroring doesn't
+	// blank out the others -- each result is keyed by server name, with a
+	// per-server error embedded instead of failing the whole response.
 	http.HandleFunc("/diagnostics/whoami", func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if _, err := verifyBearer(r, entraJWKSURL, entraIssuer, entraAudience); err != nil {
@@ -195,14 +199,23 @@ func main() {
 		}
 		bearer := authHeader[len("Bearer "):]
 
-		result, err := callToolJSON(r.Context(), runbookMCPURL, bearer, "whoami", nil)
-		if err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
+		servers := map[string]string{
+			"incident-mcp": incidentMCPURL,
+			"runbook-mcp":  runbookMCPURL,
+			"repo-mcp":     repoMCPURL,
+		}
+		results := make(map[string]json.RawMessage, len(servers))
+		for name, url := range servers {
+			result, err := callToolJSON(r.Context(), url, bearer, "whoami", nil)
+			if err != nil {
+				errJSON, _ := json.Marshal(map[string]string{"error": err.Error()})
+				results[name] = errJSON
+				continue
+			}
+			results[name] = json.RawMessage(result)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(result))
+		_ = json.NewEncoder(w).Encode(results)
 	})
 
 	addr := envOr("ADDR", ":9200")

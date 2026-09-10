@@ -1,6 +1,6 @@
 // src/App.tsx
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { CheckCircle2, Loader2, LogIn, LogOut, Send, Workflow } from "lucide-react";
+import { CheckCircle2, Fingerprint, Loader2, LogIn, LogOut, Send, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -85,6 +85,34 @@ export function App() {
     window.open(consentUrl, "elicitation-consent", "width=500,height=700");
   }
 
+  // Bypasses the LLM loop entirely (see agent/main.go's /diagnostics/whoami) -
+  // the model reliably declines to call a tool named "whoami" itself, so this
+  // is the only reliable way to show the token each of the 3 MCP servers
+  // actually received.
+  async function checkIdentity() {
+    if (busy) return;
+    setMessages((prev) => [
+      ...prev,
+      { id: newId(), role: "user", text: "Check whoami on all servers" },
+    ]);
+    setBusy(true);
+    try {
+      const res = await fetch("/api/whoami");
+      const body = await res.json();
+      setMessages((prev) => [
+        ...prev,
+        { id: newId(), role: "assistant", result: body, ok: res.ok },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { id: newId(), role: "assistant", error: `Request failed: ${String(err)}` },
+      ]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     function onMessage(event: MessageEvent) {
       if (event.data?.type !== "elicitation-code") return;
@@ -127,6 +155,15 @@ export function App() {
               <h1 className="font-heading text-lg font-medium">Incident copilot</h1>
             </div>
             <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                aria-label="Check identity across all servers"
+                disabled={busy}
+                onClick={checkIdentity}
+              >
+                <Fingerprint />
+              </Button>
               <Dialog>
                 <DialogTrigger asChild>
                   <Button variant="outline" size="sm" aria-label="View sequence diagram">
