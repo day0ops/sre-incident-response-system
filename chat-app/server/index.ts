@@ -17,9 +17,18 @@ const cfg: EntraChatConfig = {
 };
 const agentUrl = process.env.AGENT_URL ?? "http://localhost:9200";
 
+// Set by the Docker image's VERSION build-arg (the git tag on a release build,
+// short SHA otherwise -- see chat-app/Dockerfile and ci.yml). Defaults
+// gracefully for local dev, which has no image build at all.
+const appVersion = process.env.APP_VERSION ?? "dev";
+
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
+
+app.get("/api/version", (_req, res) => {
+  res.json({ version: appVersion });
+});
 
 // In-memory session store keyed by a random id cookie -- fine for a local
 // prototype, never for anything beyond it.

@@ -44,6 +44,7 @@ export function App() {
   const [messages, setMessages] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -54,6 +55,13 @@ export function App() {
     fetch("/api/session")
       .then((res) => res.json())
       .then((body: { loggedIn?: boolean }) => setLoggedIn(Boolean(body.loggedIn)));
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/version")
+      .then((res) => res.json())
+      .then((body: { version?: string }) => setVersion(body.version ?? null))
+      .catch(() => {});
   }, []);
 
   async function submit() {
@@ -153,6 +161,7 @@ export function App() {
                 SRE Incident Response System
               </p>
               <h1 className="font-heading text-lg font-medium">Incident copilot</h1>
+              {version && <p className="text-[11px] text-muted-foreground">{version}</p>}
             </div>
             <div className="flex items-center gap-2">
               <Button
